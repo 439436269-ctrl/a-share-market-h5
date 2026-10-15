@@ -247,32 +247,24 @@ let remoteTree = null;
   }
 }
 
-/**
- * 在本地重建服务端提交对象，并把本地 refs 对齐过去。
- *
- * 不预设"服务端会怎么规范化"，而是穷举参数空间并用 SHA 校验命中真实对象：
- * 时区按 15 分钟粒度覆盖 -12:00 ~ +14:00，消息试几种结尾，时间戳先信服务端报告的；
- * 若都不中再放开时间戳偏移。规则会变，SHA 校验不会骗人 —— 这是最稳的做法。
- */
-async function alignLocally(target) {
-  const rc = await api('GET', `/repos/${repoSlug}/git/commits/${target}`);
-  if (!rc.ok) {
-    console.error(`  读取远端 commit 失败 HTTP ${rc.status}`);
+/** 本地对象库里是否已有该对象 */
+async function objectExists(sha) {
+  try {
+    await git(['cat-file', '-e', sha]);
+    return true;
+  } catch {
     return false;
   }
-  const c = rc.json;
+}
+
+/**
+ * 穷举参数空间，重建某个服务端 commit 对象的**字节内容**。
+ *
+ * 不预设"服务端会怎么规范化"：时区按 15 分钟粒度覆盖 -12:00 ~ +14:00，消息试几种结尾，
+ * 时间戳先信服务端报告的；都不中再放开时间戳偏移。规则会变，SHA 校验不会骗人。
+ */
+async function reconstructCommit(c) {
   const parents = (c.parents ?? []).map((p) => p.sha);
-
-  for (const p of parents) {
-    try {
-      await git(['cat-file', '-e', `${p}^{commit}`]);
-    } catch {
-      console.error(`  父提交 ${p.slice(0, 12)} 不在本地，跳过对齐（否则会留下断链对象）`);
-      console.error(`  可连上 github.com 时执行：git fetch origin && git reset --hard origin/${BRANCH}`);
-      return false;
-    }
-  }
-
   const aTs = Math.floor(Date.parse(c.author.date) / 1000);
   const cTs = Math.floor(Date.parse(c.committer.date) / 1000);
   const base = c.message.replace(/\n+$/, '');
@@ -295,45 +287,71 @@ async function alignLocally(target) {
     return `${lines.join('\n')}\n\n${msg}`;
   };
 
-  let payload = null;
   // 阶段 1：时间戳信服务端，穷举 时区 × 消息
   for (const tz of zones) {
     for (const msg of messages) {
       const cand = build(tz, msg, aTs, cTs);
-      if (objectSha(cand) === target) {
-        payload = cand;
-        break;
-      }
+      if (objectSha(cand) === c.sha) return cand;
     }
-    if (payload) break;
   }
   // 阶段 2：时间戳也放开（±1 天，1 分钟粒度）
-  if (!payload) {
-    outer: for (const tz of ['+0000', '+0800', aIdent.tz]) {
-      for (const msg of messages) {
-        for (let d = -86400; d <= 86400; d += 60) {
-          const cand = build(tz, msg, aTs + d, cTs + d);
-          if (objectSha(cand) === target) {
-            payload = cand;
-            break outer;
-          }
-        }
+  for (const tz of ['+0000', '+0800', aIdent.tz]) {
+    for (const msg of messages) {
+      for (let d = -86400; d <= 86400; d += 60) {
+        const cand = build(tz, msg, aTs + d, cTs + d);
+        if (objectSha(cand) === c.sha) return cand;
       }
     }
   }
+  return null;
+}
 
+/**
+ * 递归把远端某条提交链补进本地对象库。
+ *
+ * 必须递归：本地与远端一旦在某个祖先处分叉，尖端对象的父提交在本地就是缺失的，
+ * 只重建尖端会留下断链对象，`git reset --hard` 也会失败。
+ * 本机实测踩过：跳过了 1846e598 这个父提交，导致对齐一直做不成。
+ */
+async function ensureCommitsLocal(sha, seen = new Set()) {
+  if (seen.has(sha)) return true;
+  seen.add(sha);
+  if (await objectExists(sha)) return true;
+
+  const r = await api('GET', `/repos/${repoSlug}/git/commits/${sha}`);
+  if (!r.ok) {
+    console.error(`  读取远端提交 ${sha.slice(0, 12)} 失败 HTTP ${r.status}`);
+    return false;
+  }
+  const c = r.json;
+  for (const p of (c.parents ?? []).map((x) => x.sha)) {
+    if (!(await ensureCommitsLocal(p, seen))) return false;
+  }
+  const payload = await reconstructCommit(c);
   if (!payload) {
-    console.error('  无法在本地重建服务端提交对象（参数空间已穷举）');
+    console.error(`  无法重建提交对象 ${sha.slice(0, 12)}（参数空间已穷举）`);
+    return false;
+  }
+  await writeGitObject(payload);
+  console.log(`  已重建 ${sha.slice(0, 12)}`);
+  return true;
+}
+
+/**
+ * 把本地 refs 对齐到服务端提交。
+ *
+ * 若不先把整条缺失链补进本地对象库就 reset，会得到断链的仓库 —— 所以顺序是
+ * 「递归重建 → 写对象 → 更新 refs → reset」。
+ */
+async function alignLocally(target) {
+  if (!(await ensureCommitsLocal(target))) {
     console.error(`  可连上 github.com 时执行：git fetch origin && git reset --hard origin/${BRANCH}`);
     return false;
   }
-
   if (ALLOW_DIRTY) {
-    console.error('  --allow-dirty：已重建对象但跳过本地 refs 对齐');
+    console.error('  --allow-dirty：已补齐对象但跳过本地 refs 对齐');
     return false;
   }
-
-  await writeGitObject(payload);
   await git(['update-ref', `refs/heads/${BRANCH}`, target]);
   await git(['update-ref', `refs/remotes/origin/${BRANCH}`, target]);
   await git(['reset', '--hard', target]);
@@ -342,7 +360,7 @@ async function alignLocally(target) {
   } catch {
     /* 上游已设置则忽略 */
   }
-  console.log('✓ 已重建服务端提交对象并把本地 refs 对齐（tree 不变，内容不受影响）');
+  console.log('✓ 本地 refs 已对齐到服务端提交（tree 不变，内容不受影响）');
   return true;
 }
 
