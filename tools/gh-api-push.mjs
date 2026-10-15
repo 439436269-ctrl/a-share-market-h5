@@ -4,18 +4,27 @@
  * ## 为什么需要它
  * 某些网络下 `api.github.com` 完全正常，但 `github.com:443` 的 git 通道会被重置：
  * `git push` 报 `Recv failure: Connection was reset`，`git ls-remote` 直接卡死。
- * 此时改用 Git Data API（只有 api.github.com）就能把代码推上去。
+ * 此时改用 Git Data API（只依赖 api.github.com）就能把代码推上去。
  *
- * ## 它和 `git push` 的差别
- * commit 对象由服务端生成，author/committer/时间戳/消息结尾都可能被规范化，
- * 因此**服务端算出的 SHA 通常与本地不同**。本脚本的处理方式是：
- *   1. 建 tree 后**断言**远端 tree SHA == 本地 `HEAD^{tree}`，不等就中止（ref 不动）；
- *   2. 建 commit 时把本地元数据全部传过去，并试几种消息结尾写法，
- *      尽量命中与本地**完全相同的 SHA**；
- *   3. 无论是否命中，最后都把本地 refs 对齐到服务端提交 ——
- *      保证本地与远端始终是同一个提交，不会出现 ahead/分叉。
+ * ## 一致性策略
+ * - **内容以 tree 为准（硬校验）**：建完 tree 后断言远端 tree SHA == 本地 `HEAD^{tree}`，
+ *   不等就中止且不动 ref。commit SHA 会因服务端规范化元数据而变化，tree 不会。
+ * - **SHA 尽量一致**：把本地元数据原样传给服务端，尽量让服务端算出与本地相同的 SHA。
+ * - **对不齐就对齐**：若服务端规范化导致 SHA 不同，则从 API 读回服务端提交的元数据，
+ *   在本地穷举重建出**字节完全相同**的提交对象，再把本地 refs 指过去 ——
+ *   于是本地与远端始终是同一个提交，永远不会出现 ahead / 分叉。
  *
- * 换句话说：**内容以 tree 为准（强校验），SHA 以服务端为准（自动对齐）**。
+ * ## 实测得到的服务端规范化规则（照这些写才能命中相同的 SHA）
+ * 1. **消息逐字节保存**：传什么存什么。（坑：API 返回的 `message` 字段会**去掉尾部空白**，
+ *    照它去比对会误以为"服务端改了消息"，本机实测被这一点误导过。）
+ * 2. **时区取自入参的 UTC 偏移**：传 `+08:00` 就存 `+0800`，传 `Z` 就存 `+0000`。
+ *    所以**不要**用 `toISOString()`（那会变成 Z），要用 `toIsoWithOffset()` 保住原始偏移。
+ * 3. 时间戳（秒）原样保留，不取整。
+ *
+ * ## 安全防护
+ * 本工具在需要对齐时会执行 `git reset --hard`，**会丢弃未提交的改动** ——
+ * 本机就真的被它冲掉过一次尚未提交的修复。所以启动时先检查工作区，
+ * 不干净就直接拒绝运行（确需继续用 `--allow-dirty`，那样会跳过本地 refs 对齐）。
  *
  * ## 用法
  *   node tools/gh-api-push.mjs                 # 推送当前分支到 origin
@@ -24,7 +33,7 @@
  *
  * 凭据从系统凭据管理器取（`git credential fill`），不落盘、不打印。
  * Windows 上凭据按 `git:https://<user>@github.com` 分账号存储，
- * 所以必须带 username，否则会退化成交互提示而卡住。
+ * 必须带 username，否则 GCM 会退化成交互提示而卡住。
  */
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -32,7 +41,6 @@ import { createHash } from 'node:crypto';
 
 const execFileP = promisify(execFile);
 const API = 'https://api.github.com';
-const GH_USER = process.env.GH_USER ?? '';
 
 // ------------------------------------------------------------------ 参数
 
@@ -44,12 +52,13 @@ const opt = (name, fallback) => {
 };
 
 const DRY_RUN = flag('--dry-run');
+const ALLOW_DIRTY = flag('--allow-dirty');
 const BRANCH = opt('--branch', 'main');
+const GH_USER = process.env.GH_USER ?? '';
 
 const git = (args, encoding = 'utf8') =>
   execFileP('git', args, { maxBuffer: 256 * 1024 * 1024, encoding }).then((r) => r.stdout);
 
-/** 从 origin 里解析出 owner/repo，并顺带拿到凭据用的用户名 */
 async function resolveRepo() {
   const explicit = opt('--repo', '');
   if (explicit) return explicit;
@@ -57,10 +66,6 @@ async function resolveRepo() {
   const m = /github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?$/.exec(url);
   if (!m) throw new Error(`无法从 origin 解析 owner/repo: ${url}`);
   return `${m[1]}/${m[2]}`;
-}
-
-function resolveUser(repoSlug) {
-  return GH_USER || repoSlug.split('/')[0];
 }
 
 // ------------------------------------------------------------------ 凭据
@@ -99,7 +104,7 @@ function readCredential(user) {
         return reject(
           new Error(
             `凭据管理器里没有 ${user}@github.com 的 token。\n` +
-              `  提示：Windows 上请确认凭据目标形如 git:https://${user}@github.com`,
+              `  提示：Windows 上凭据目标应形如 git:https://${user}@github.com`,
           ),
         );
       }
@@ -110,7 +115,7 @@ function readCredential(user) {
   });
 }
 
-// ------------------------------------------------------------------ 工具
+// ------------------------------------------------------------------ git 对象工具
 
 /** git 对象 SHA = sha1("<type> <字节长度>\0" + 内容)。长度按字节算，含中文时 ≠ 字符数 */
 function objectSha(payload) {
@@ -120,17 +125,55 @@ function objectSha(payload) {
     .digest('hex');
 }
 
-/** git 提交对象里的时间格式：<unix-ts> <±HHMM> */
+/** 从 ISO 日期里取出 (unix 秒, ±HHMM) */
 function toGitDate(iso) {
   const ts = Math.floor(Date.parse(iso) / 1000);
   const m = /([+-])(\d{2}):(\d{2})$/.exec(iso);
   return { ts, tz: m ? `${m[1]}${m[2]}${m[3]}` : '+0000' };
 }
 
+/**
+ * 还原成**带原始 UTC 偏移**的 ISO 字符串。
+ * 千万不能用 toISOString()：那会变成 Z 形式，服务端就会把提交对象写成 +0000，SHA 与本地不一致。
+ */
+function toIsoWithOffset(ts, tz) {
+  const sign = tz.startsWith('-') ? -1 : 1;
+  const offMin = sign * (Number(tz.slice(1, 3)) * 60 + Number(tz.slice(3, 5)));
+  const wall = new Date((ts + offMin * 60) * 1000).toISOString().replace(/\.\d{3}Z$/, '');
+  return `${wall}${tz.slice(0, 3)}:${tz.slice(3, 5)}`;
+}
+
+/** 把 commit 对象写进本地对象库 */
+function writeGitObject(payload) {
+  return new Promise((resolve, reject) => {
+    const p = spawn('git', ['hash-object', '-t', 'commit', '-w', '--stdin']);
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (d) => (out += d.toString()));
+    p.stderr.on('data', (d) => (err += d.toString()));
+    p.on('close', (code) => (code === 0 ? resolve(out.trim()) : reject(new Error(err))));
+    p.stdin.end(Buffer.from(payload, 'utf8'));
+  });
+}
+
 // ------------------------------------------------------------------ 主流程
 
 const repoSlug = await resolveRepo();
-const user = resolveUser(repoSlug);
+const user = GH_USER || repoSlug.split('/')[0];
+
+// ---- 安全检查：工作区必须干净（后面可能 reset --hard）
+{
+  const dirty = (await git(['status', '--porcelain'])).trim();
+  if (dirty && !ALLOW_DIRTY) {
+    console.error('✗ 工作区有未提交的改动，拒绝运行。');
+    console.error('  原因：本工具在需要对齐 refs 时会执行 git reset --hard，会丢弃这些改动。');
+    console.error('  处理：先 git commit（推荐），或显式加 --allow-dirty（那样会跳过本地 refs 对齐）\n');
+    console.error(dirty.split('\n').slice(0, 10).map((l) => `  ${l}`).join('\n'));
+    process.exit(1);
+  }
+  if (dirty) console.warn('! --allow-dirty：工作区不干净，若需要对齐 refs 将跳过本地 reset\n');
+}
+
 const token = await readCredential(user);
 
 let apiCalls = 0;
@@ -172,7 +215,6 @@ const parseIdent = (line) => {
 };
 const aIdent = parseIdent(headerLines.find((l) => l.startsWith('author ')));
 const cIdent = parseIdent(headerLines.find((l) => l.startsWith('committer ')));
-const localParents = headerLines.filter((l) => l.startsWith('parent ')).map((l) => l.slice(7));
 
 const listing = (await git(['ls-tree', '-r', '-z', 'HEAD'], 'buffer')).toString('utf8');
 const entries = listing
@@ -188,7 +230,7 @@ const entries = listing
 console.log(`仓库   ${repoSlug}  (分支 ${BRANCH})`);
 console.log(`本地   ${localSha.slice(0, 12)}  tree ${localTree.slice(0, 12)}  ${entries.length} 个文件`);
 console.log(`作者   ${aIdent.name} <${aIdent.email}> ${aIdent.ts} ${aIdent.tz}`);
-if (DRY_RUN) console.log('模式   干跑（不上传）');
+if (DRY_RUN) console.log('模式   干跑（不做任何写入）');
 
 // ---- 远端状态
 let remoteSha = null;
@@ -205,17 +247,123 @@ let remoteTree = null;
   }
 }
 
-if (remoteTree === localTree) {
-  console.log('\n✓ 远端 tree 与本地完全一致 —— 没有内容需要推送');
-  process.exit(0);
+/**
+ * 在本地重建服务端提交对象，并把本地 refs 对齐过去。
+ *
+ * 不预设"服务端会怎么规范化"，而是穷举参数空间并用 SHA 校验命中真实对象：
+ * 时区按 15 分钟粒度覆盖 -12:00 ~ +14:00，消息试几种结尾，时间戳先信服务端报告的；
+ * 若都不中再放开时间戳偏移。规则会变，SHA 校验不会骗人 —— 这是最稳的做法。
+ */
+async function alignLocally(target) {
+  const rc = await api('GET', `/repos/${repoSlug}/git/commits/${target}`);
+  if (!rc.ok) {
+    console.error(`  读取远端 commit 失败 HTTP ${rc.status}`);
+    return false;
+  }
+  const c = rc.json;
+  const parents = (c.parents ?? []).map((p) => p.sha);
+
+  for (const p of parents) {
+    try {
+      await git(['cat-file', '-e', `${p}^{commit}`]);
+    } catch {
+      console.error(`  父提交 ${p.slice(0, 12)} 不在本地，跳过对齐（否则会留下断链对象）`);
+      console.error(`  可连上 github.com 时执行：git fetch origin && git reset --hard origin/${BRANCH}`);
+      return false;
+    }
+  }
+
+  const aTs = Math.floor(Date.parse(c.author.date) / 1000);
+  const cTs = Math.floor(Date.parse(c.committer.date) / 1000);
+  const base = c.message.replace(/\n+$/, '');
+  const messages = [...new Set([c.message, base, `${base}\n`, `${base}\n\n`])];
+
+  const zones = [];
+  for (let m = -12 * 60; m <= 14 * 60; m += 15) {
+    const sign = m < 0 ? '-' : '+';
+    const abs = Math.abs(m);
+    const hh = String(Math.floor(abs / 60)).padStart(2, '0');
+    const mm = String(abs % 60).padStart(2, '0');
+    zones.push(`${sign}${hh}${mm}`);
+  }
+
+  const build = (tz, msg, a, k) => {
+    const lines = [`tree ${c.tree.sha}`];
+    for (const p of parents) lines.push(`parent ${p}`);
+    lines.push(`author ${c.author.name} <${c.author.email}> ${a} ${tz}`);
+    lines.push(`committer ${c.committer.name} <${c.committer.email}> ${k} ${tz}`);
+    return `${lines.join('\n')}\n\n${msg}`;
+  };
+
+  let payload = null;
+  // 阶段 1：时间戳信服务端，穷举 时区 × 消息
+  for (const tz of zones) {
+    for (const msg of messages) {
+      const cand = build(tz, msg, aTs, cTs);
+      if (objectSha(cand) === target) {
+        payload = cand;
+        break;
+      }
+    }
+    if (payload) break;
+  }
+  // 阶段 2：时间戳也放开（±1 天，1 分钟粒度）
+  if (!payload) {
+    outer: for (const tz of ['+0000', '+0800', aIdent.tz]) {
+      for (const msg of messages) {
+        for (let d = -86400; d <= 86400; d += 60) {
+          const cand = build(tz, msg, aTs + d, cTs + d);
+          if (objectSha(cand) === target) {
+            payload = cand;
+            break outer;
+          }
+        }
+      }
+    }
+  }
+
+  if (!payload) {
+    console.error('  无法在本地重建服务端提交对象（参数空间已穷举）');
+    console.error(`  可连上 github.com 时执行：git fetch origin && git reset --hard origin/${BRANCH}`);
+    return false;
+  }
+
+  if (ALLOW_DIRTY) {
+    console.error('  --allow-dirty：已重建对象但跳过本地 refs 对齐');
+    return false;
+  }
+
+  await writeGitObject(payload);
+  await git(['update-ref', `refs/heads/${BRANCH}`, target]);
+  await git(['update-ref', `refs/remotes/origin/${BRANCH}`, target]);
+  await git(['reset', '--hard', target]);
+  try {
+    await git(['branch', `--set-upstream-to=origin/${BRANCH}`, BRANCH]);
+  } catch {
+    /* 上游已设置则忽略 */
+  }
+  console.log('✓ 已重建服务端提交对象并把本地 refs 对齐（tree 不变，内容不受影响）');
+  return true;
 }
 
-// ---- 空仓库播种（Git Data API 对空仓库会返回 409 Git Repository is empty）
+// ---- 内容已经一致：只需处理提交对象差异
+if (remoteTree === localTree) {
+  console.log('\n✓ 远端 tree 与本地完全一致 —— 没有内容需要推送');
+  if (remoteSha === localSha) {
+    console.log('✓ 本地与服务端是同一个提交，无需对齐');
+    process.exit(0);
+  }
+  console.log(`△ 但提交对象不同：本地 ${localSha.slice(0, 12)} / 远端 ${remoteSha.slice(0, 12)}，尝试对齐…`);
+  const aligned = await alignLocally(remoteSha);
+  console.log(`\n分支状态: ${(await git(['status', '-sb'])).trim().split('\n')[0]}`);
+  process.exit(aligned ? 0 : 2);
+}
+
+// ---- 空仓库播种（Git Data API 对空仓库返回 409 Git Repository is empty）
 if (!remoteSha) {
   if (DRY_RUN) {
     console.log('[干跑] 跳过播种');
   } else {
-    // 种子文件必须选「本地树里也有、随后会被覆盖」的那个，最终 tree 才会恰好等于本地 tree
     const seed = await api('PUT', `/repos/${repoSlug}/contents/README.md`, {
       message: 'chore: initialize repository',
       content: Buffer.from('# initialize\n').toString('base64'),
@@ -232,7 +380,7 @@ if (!remoteSha) {
   }
 }
 
-// ---- 复用远端已有 blob（避免每次推送重传所有文件，含图片）
+// ---- 复用远端已有 blob（path → sha），未变化的文件不重传
 const existing = new Map();
 if (remoteTree) {
   const t = await api('GET', `/repos/${repoSlug}/git/trees/${remoteTree}?recursive=1`);
@@ -241,7 +389,6 @@ if (remoteTree) {
   }
 }
 
-// ---- 上传 blob
 const remoteEntries = [];
 let uploaded = 0;
 let reused = 0;
@@ -265,9 +412,6 @@ for (const e of entries) {
   if (!res.ok) {
     console.error(`上传 ${e.path} 失败 HTTP ${res.status}: ${JSON.stringify(res.json).slice(0, 200)}`);
     process.exit(1);
-  }
-  if (res.json.sha !== e.sha) {
-    console.warn(`  ! ${e.path} blob SHA 不一致（本地 ${e.sha.slice(0, 8)} / 远端 ${res.json.sha.slice(0, 8)}）`);
   }
   remoteEntries.push({ path: e.path, mode: e.mode, type: 'blob', sha: res.json.sha });
   uploaded += 1;
@@ -297,42 +441,33 @@ if (treeRes.json.sha !== localTree) {
 }
 console.log('✓ tree 完全一致（内容等价，这是唯一硬性标准）');
 
-// ---- 建 commit：试几种消息结尾，尽量命中与本地相同的 SHA
-// 经验：服务端会在消息末尾补一个换行，所以要先减一个再发
-const messageCandidates = [
-  rawMessage,
-  rawMessage.replace(/\n$/, ''),
-  rawMessage.replace(/\n+$/, ''),
-  `${rawMessage.replace(/\n+$/, '')}\n`,
-];
-const seen = new Set();
-const uniqMessages = messageCandidates.filter((m) => !seen.has(m) && seen.add(m));
-
+// ---- 建 commit：消息**逐字节原样**发送，日期带原始 UTC 偏移
 let finalSha = null;
 let hitExact = false;
-for (const [i, msg] of uniqMessages.entries()) {
+{
   const res = await api('POST', `/repos/${repoSlug}/git/commits`, {
-    message: msg,
+    message: rawMessage,
     tree: treeRes.json.sha,
     parents: remoteSha ? [remoteSha] : [],
-    author: { name: aIdent.name, email: aIdent.email, date: new Date(aIdent.ts * 1000).toISOString() },
-    committer: { name: cIdent.name, email: cIdent.email, date: new Date(cIdent.ts * 1000).toISOString() },
+    author: { name: aIdent.name, email: aIdent.email, date: toIsoWithOffset(aIdent.ts, aIdent.tz) },
+    committer: {
+      name: cIdent.name,
+      email: cIdent.email,
+      date: toIsoWithOffset(cIdent.ts, cIdent.tz),
+    },
   });
   if (!res.ok) {
     console.error(`建 commit 失败 HTTP ${res.status}: ${JSON.stringify(res.json).slice(0, 300)}`);
     process.exit(1);
   }
-  const sha = res.json.sha;
-  const exact = sha === localSha;
-  console.log(`[commit] 候选 ${i + 1}/${uniqMessages.length} 消息结尾=${JSON.stringify(msg.slice(-2))} → ${sha.slice(0, 12)}${exact ? '  ✓ 与本地相同' : ''}`);
-  finalSha = sha;
-  if (exact) {
-    hitExact = true;
-    break;
-  }
+  finalSha = res.json.sha;
+  hitExact = finalSha === localSha;
+  console.log(
+    `[commit] 服务端 ${finalSha.slice(0, 12)}  ${
+      hitExact ? '✓ 与本地完全相同' : `△ 与本地 ${localSha.slice(0, 12)} 不同`
+    }`,
+  );
 }
-// 未命中时以最后一个为准（parent 与本地一致时，通常第一个候选即命中）
-console.log(hitExact ? '✓ commit SHA 与本地完全一致' : '△ commit SHA 与本地不同（内容仍等价），稍后把本地 refs 对齐到服务端');
 
 // ---- 更新 ref
 const patch = await api('PATCH', `/repos/${repoSlug}/git/refs/heads/${BRANCH}`, {
@@ -345,44 +480,17 @@ if (!patch.ok) {
 }
 console.log(`✓ ${BRANCH} → ${patch.json.object.sha.slice(0, 12)}`);
 
-// ---- 对齐本地 refs：始终让本地与远端是同一个提交
-if (!hitExact) {
-  const lines = [`tree ${treeRes.json.sha}`];
-  if (remoteSha) lines.push(`parent ${remoteSha}`);
-  lines.push(`author ${aIdent.name} <${aIdent.email}> ${aIdent.ts} ${aIdent.tz}`);
-  lines.push(`committer ${cIdent.name} <${cIdent.email}> ${cIdent.ts} ${cIdent.tz}`);
-  const bodyNoTail = rawMessage.replace(/\n+$/, '');
-  const candidates = [`${lines.join('\n')}\n\n${bodyNoTail}\n\n`, `${lines.join('\n')}\n\n${bodyNoTail}\n`];
-  let payload = null;
-  for (const c of candidates) {
-    if (objectSha(c) === finalSha) {
-      payload = c;
-      break;
-    }
-  }
-  if (payload) {
-    await new Promise((resolve, reject) => {
-      const p = spawn('git', ['hash-object', '-t', 'commit', '-w', '--stdin']);
-      let out = '';
-      p.stdout.on('data', (d) => (out += d.toString()));
-      p.on('close', (code) => (code === 0 ? resolve(out.trim()) : reject(new Error('写入对象失败'))));
-      p.stdin.end(Buffer.from(payload, 'utf8'));
-    });
-    await git(['update-ref', `refs/heads/${BRANCH}`, finalSha]);
-    await git(['update-ref', `refs/remotes/origin/${BRANCH}`, finalSha]);
-    await git(['reset', '--hard', finalSha]);
-    console.log('✓ 已重建服务端提交对象并把本地 refs 对齐（tree 不变，内容不受影响）');
-  } else {
-    console.error('! 无法在本地重建服务端提交对象，本地 refs 未对齐');
-    console.error(`  下一次能连上 github.com 时执行：git fetch origin && git reset --hard origin/${BRANCH}`);
-  }
-} else {
+// ---- 对齐本地 refs
+if (hitExact) {
   await git(['update-ref', `refs/remotes/origin/${BRANCH}`, finalSha]);
   try {
     await git(['branch', `--set-upstream-to=origin/${BRANCH}`, BRANCH]);
   } catch {
     /* 上游已设置则忽略 */
   }
+} else {
+  const ok = await alignLocally(finalSha);
+  if (!ok) process.exitCode = 2;
 }
 
 console.log(`\n仓库地址: https://github.com/${repoSlug}`);
