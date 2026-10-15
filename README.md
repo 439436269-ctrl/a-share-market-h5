@@ -235,6 +235,35 @@ node tools/visual-check.mjs --url "http://localhost:4173/#/stock/600519.SH" \
 
 ---
 
+## 附：`git push` 被重置时怎么推送
+
+某些网络下 `api.github.com` 完全正常，但 `github.com:443` 的 git 通道会被重置：
+`git push` 报 `Recv failure: Connection was reset`，`git ls-remote` 直接卡死。
+此时用仓库自带的 Git Data API 推送工具（只依赖 `api.github.com`）：
+
+```bash
+node tools/gh-api-push.mjs              # 推送当前分支到 origin
+node tools/gh-api-push.mjs --dry-run    # 只算不上传多少 blob
+```
+
+设计取舍（这几条都是踩出来的）：
+
+- **内容以 tree 为准**：建完 tree 后断言远端 tree SHA == 本地 `HEAD^{tree}`，不等就中止且不动 ref。
+  这是唯一可靠的一致性强校验 —— commit SHA 会因服务端规范化元数据而变化，tree 不会。
+- **SHA 以服务端为准**：commit 的 author/committer/时间戳/消息结尾由服务端生成，
+  可能被规范化（实测：时区保留、消息末尾补一个换行）。
+  脚本会试几种消息结尾尽量命中与本地相同的 SHA；命中不了就把本地 refs 对齐到服务端提交，
+  保证**永远不出现 ahead / 分叉**。
+- **复用已有 blob**：先取远端 tree 的 `path → sha` 映射，未变化的文件直接复用，
+  不会每次推送都把图片重传一遍。
+- **凭据不落盘**：从系统凭据管理器取（`git credential fill`），不打印。
+  Windows 上凭据按 `git:https://<user>@github.com` **分账号**存储，
+  必须带 username，否则会退化成交互提示而卡死 —— 这是本机实测踩过的坑。
+- **空仓库要先播种**：Git Data API 对没有任何提交的仓库会返回
+  `409 Git Repository is empty`，所以脚本会先用 Contents API 造一个 README 提交建出分支。
+
+---
+
 ## 踩坑记录（都是本项目真实修过的）
 
 ### 1. 交易分钟 vs 墙上时钟分钟
