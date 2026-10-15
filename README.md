@@ -261,6 +261,9 @@ node tools/gh-api-push.mjs --dry-run    # 只算不上传多少 blob
   必须带 username，否则会退化成交互提示而卡死 —— 这是本机实测踩过的坑。
 - **空仓库要先播种**：Git Data API 对没有任何提交的仓库会返回
   `409 Git Repository is empty`，所以脚本会先用 Contents API 造一个 README 提交建出分支。
+- **拒绝在脏工作区运行**：对齐 refs 时它会执行 `git reset --hard`，会丢弃未提交的改动 ——
+  开发这个脚本时它就把自己尚未提交的修复冲掉过一次。现在工作区不干净会直接拒绝运行
+  （确需继续用 `--allow-dirty`，那样会跳过本地 refs 对齐）。
 
 ---
 
