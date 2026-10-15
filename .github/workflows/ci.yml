@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 不显式写 version：action 会读 package.json 的 packageManager 字段，
+      # 两处都写会报 "Multiple versions of pnpm specified"
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查（4 个包）
+        run: pnpm -r typecheck
+
+      # 自包含：脚本会自己拉起一个临时 BFF 实例，结束后关闭，不依赖任何外部服务
+      - name: 行情协议自动化自测
+        run: pnpm test:protocol
+
+      - name: 构建前端
+        run: pnpm --filter @stock/web build

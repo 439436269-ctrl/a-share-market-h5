@@ -1,0 +1,7 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+
+# pnpm 10+ 默认拦截依赖的构建脚本；esbuild 必须放行，否则 Vite 无法启动
+allowBuilds:
+  esbuild: true

@@ -1,0 +1,22 @@
+{
+  "name": "stock-market-h5",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "description": "A股行情移动端 H5 —— 实时推送 / Canvas 自绘分时与K线 / 五档盘口",
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"pnpm dev:server\" \"pnpm dev:web\"",
+    "dev:server": "pnpm --filter @stock/server dev",
+    "dev:web": "pnpm --filter @stock/web dev",
+    "build": "pnpm --filter @stock/web build",
+    "typecheck": "pnpm -r typecheck",
+    "test:protocol": "pnpm --filter @stock/server test:protocol",
+    "test:visual": "node tools/visual-check.mjs --url http://localhost:4173/ --measure",
+    "bench": "pnpm --filter @stock/server bench"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.6.3"
+  }
+}
