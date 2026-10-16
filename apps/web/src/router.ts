@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react';
 export type Route =
   | { name: 'watchlist' }
   | { name: 'markets' }
+  | { name: 'trade' }
   | { name: 'profile' }
   | { name: 'detail'; symbol: string };
 
@@ -19,6 +20,7 @@ export function parseRoute(hash: string): Route {
     if (symbol) return { name: 'detail', symbol };
   }
   if (raw === 'market') return { name: 'markets' };
+  if (raw === 'trade') return { name: 'trade' };
   if (raw === 'me') return { name: 'profile' };
   return { name: 'watchlist' };
 }

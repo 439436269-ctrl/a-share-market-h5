@@ -7,6 +7,7 @@
 import { MarketConnection } from '@stock/market-client';
 import type { Instrument } from '@stock/market-core';
 import { marketStore, instrumentStore } from './store';
+import { tradingStore } from './tradingStore';
 
 /** 开发环境走 Vite 代理，生产环境同源，所以直接用当前 host 即可 */
 function resolveWsUrl(): string {
@@ -42,6 +43,18 @@ export const connection = new MarketConnection({
   onStats: (stats) => marketStore.setStats(stats),
 
   log: (msg) => marketStore.pushLog(`[协议] ${msg}`),
+
+  // ---- 交易私有回报：与行情走同一根连接，但属于另一套可靠性语义
+  onTradingSnapshot: (snapshot) => {
+    tradingStore.setSnapshot(snapshot);
+    marketStore.pushLog(`[交易] 快照：委托 ${snapshot.orders.length} 笔 · 成交 ${snapshot.trades.length} 笔`);
+  },
+  onOrder: (order) => tradingStore.upsertOrder(order),
+  onTrade: (trade) => {
+    tradingStore.addTrade(trade);
+    marketStore.pushLog(`[成交] ${trade.symbol} ${trade.side === 'buy' ? '买' : '卖'} ${trade.volume} 股 @ ${trade.price}`);
+  },
+  onAccount: (account) => tradingStore.setAccount(account),
 });
 
 /** 应用启动：拉主数据 + 自选列表，然后建连、订阅 */

@@ -29,6 +29,7 @@ import type { ClientMessage, MarketPhase, Quote } from '@stock/market-core';
 import type { QuoteSource } from './sources';
 import type { SimClock } from './clock';
 import type { KlineStore } from './kline';
+import type { TradingService } from './trading';
 import { INSTRUMENT_MAP, INSTRUMENTS } from './instruments';
 
 interface ClientState {
@@ -57,6 +58,11 @@ export class MarketGateway {
   private lastVirtualNow = 0;
   private sentFrames = 0;
   private droppedFrames = 0;
+  /** 交易服务（延后注入：它需要 gateway 来推回报，两者互为依赖，用 setter 打破循环） */
+  private trading: TradingService | null = null;
+  /** 资金持仓推送节流计数：每 N 帧推一次，让持仓市值随行情跳动又不过度发消息 */
+  private frameCounter = 0;
+  private static readonly ACCOUNT_PUSH_EVERY = 2;
 
   constructor(
     private readonly source: QuoteSource,
@@ -85,6 +91,16 @@ export class MarketGateway {
         heartbeatMs: HEARTBEAT_MS,
         frameMs: this.frameMs,
       });
+      // 建连即推交易快照：避免"先 REST 拉一次、再等推送"之间出现状态空窗
+      if (this.trading) {
+        const snap = this.trading.snapshot();
+        this.send(ws, {
+          t: 'trading',
+          orders: snap.orders,
+          trades: snap.trades,
+          account: snap.account,
+        });
+      }
 
       ws.on('message', (raw) => this.onMessage(ws, raw.toString()));
       ws.on('close', () => this.clients.delete(ws));
@@ -105,6 +121,24 @@ export class MarketGateway {
     this.wss = null;
     for (const ws of this.clients.keys()) ws.close(1001, 'server shutdown');
     this.clients.clear();
+  }
+
+  /** 注入交易服务（打破 gateway ↔ trading 的循环依赖） */
+  setTrading(trading: TradingService): void {
+    this.trading = trading;
+  }
+
+  /**
+   * 推送交易私有回报。
+   *
+   * 与行情帧的区别：行情是"广播 + 可丢 + 可全量补拉"，交易回报是"用户私有 + 必须逐条送达"。
+   * 所以它不走 seq 帧机制，也不受订阅集合过滤 —— 委托状态与订阅了哪些标的一点关系都没有。
+   */
+  pushTrading(msg: Parameters<typeof jsonCodec.encodeServer>[0]): void {
+    const payload = jsonCodec.encodeServer(msg);
+    for (const ws of this.clients.keys()) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+    }
   }
 
   // ------------------------------------------------------------------ 单帧
@@ -141,6 +175,15 @@ export class MarketGateway {
 
     // 逐笔归并进 1 分钟 bar
     for (const t of ticks) this.kline.appendTick(t.symbol, t.price, t.volume, now);
+
+    // 撮合：挂单随最新行情重新撮合（成交会同步抛出委托/成交/资金回报）
+    this.trading?.onQuotes(quotes);
+
+    // 资金持仓节流推送：让持仓市值与浮动盈亏随行情跳动
+    this.frameCounter += 1;
+    if (this.trading && this.frameCounter % MarketGateway.ACCOUNT_PUSH_EVERY === 0) {
+      this.pushTrading({ t: 'account', account: this.trading.getAccount() });
+    }
 
     this.seq += 1;
 
@@ -228,6 +271,8 @@ export class MarketGateway {
       clock: this.clock.describe(),
       sessionMinute: sessionMinuteIndex(this.clock.now()),
       instruments: INSTRUMENTS.length,
+      orders: this.trading?.getOrders().length ?? 0,
+      trades: this.trading?.getTrades().length ?? 0,
     };
   }
 }

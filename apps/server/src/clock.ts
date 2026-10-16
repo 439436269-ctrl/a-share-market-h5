@@ -89,6 +89,9 @@ export class SimClock {
    */
   tickRollover(): boolean {
     if (this.mode === 'live') return false;
+    // 起始时刻若已设在收盘之后（如 SIM_START=16:00），说明是想停在收盘状态观察，
+    // 此时不应翻日 —— 否则第一帧就会把时间拉回盘中，永远测不到收盘分支
+    if (this.startSeconds >= SESSION_END) return false;
     const elapsedReal = Date.now() - this.dayAnchorReal;
     const virtualSeconds = this.startSeconds + (elapsedReal * this.speed) / 1000;
     if (virtualSeconds < SESSION_END) return false;

@@ -12,6 +12,7 @@
     "build": "pnpm --filter @stock/web build",
     "typecheck": "pnpm -r typecheck",
     "test:protocol": "pnpm --filter @stock/server test:protocol",
+    "test:trading": "pnpm --filter @stock/server test:trading",
     "test:visual": "node tools/visual-check.mjs --url http://localhost:4173/ --measure",
     "bench": "pnpm --filter @stock/server bench"
   },

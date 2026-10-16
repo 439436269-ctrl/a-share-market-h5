@@ -18,11 +18,12 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { sessionMinuteIndex } from '@stock/market-core';
-import type { Period } from '@stock/market-core';
+import type { OrderDraft, Period } from '@stock/market-core';
 import { SimClock } from './clock';
 import type { ClockMode } from './clock';
 import { KlineStore } from './kline';
 import { MarketGateway } from './gateway';
+import { TradingService } from './trading';
 import { MockQuoteSource, createSource } from './sources';
 import { DEFAULT_WATCHLIST, INSTRUMENTS, INSTRUMENT_MAP } from './instruments';
 
@@ -86,8 +87,25 @@ const gateway = new MarketGateway(source, clock, kline, {
   onRollover: reseedSession,
 });
 
+/**
+ * 交易服务。
+ * 回报推给网关 → 网关广播给所有连接；交易服务自身不关心连接，只关心账务。
+ * 这里用 setter 注入而不用构造参数，是为了打破 gateway ↔ trading 的循环依赖。
+ */
+const trading = new TradingService({
+  onOrder: (order) => gateway.pushTrading({ t: 'order', order }),
+  onTrade: (trade) => gateway.pushTrading({ t: 'trade', trade }),
+  onAccount: (account) => gateway.pushTrading({ t: 'account', account }),
+});
+gateway.setTrading(trading);
+
 source.bootstrap();
 reseedSession();
+
+// 把初始行情灌给交易服务。
+// 收盘后没有帧在跑（无订阅即空转），但下单校验仍需要行情才能判断"是否交易时段" ——
+// 不灌的话收盘时下单会错报"暂无行情"，而不是"非交易时段"。
+trading.onQuotes(source.snapshot(INSTRUMENTS.map((i) => i.symbol), clock.phase()));
 const seeded = sessionMinuteIndex(clock.now()) + 1;
 if (seeded > 0) {
   console.log(`[K线] 已播种当日分时 ${seeded} 分钟 × ${INSTRUMENTS.length} 标的`);
@@ -122,12 +140,29 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
 
+  // 交易类接口都是 POST，交给独立的路由函数处理（需要读请求体）
+  if (req.method === 'POST') {
+    void handlePost(req, res, url);
+    return;
+  }
+
   switch (path) {
     case '/':
       json(res, {
         name: 'stock-market-h5 BFF',
         ws: `ws://localhost:${PORT}/ws`,
-        endpoints: ['/api/instruments', '/api/watchlist', '/api/quotes', '/api/kline', '/api/stats'],
+        endpoints: [
+          '/api/instruments',
+          '/api/watchlist',
+          '/api/quotes',
+          '/api/kline',
+          '/api/account',
+          '/api/orders',
+          '/api/trades',
+          '/api/trading/limits',
+          '/api/stats',
+        ],
+        post: ['/api/orders', '/api/orders/:orderId/cancel'],
       });
       return;
 
@@ -177,6 +212,34 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
       json(res, gateway.stats);
       return;
 
+    // ---------------------------------------------------------------- 交易查询
+    case '/api/account':
+      json(res, trading.getAccount());
+      return;
+
+    case '/api/orders':
+      json(res, trading.getOrders());
+      return;
+
+    case '/api/trades':
+      json(res, trading.getTrades());
+      return;
+
+    /**
+     * 一键最大可买/可卖。
+     * 刻意放在服务端算：整手规则、预留手续费这些口径如果前端各算一遍，
+     * 迟早出现"前端说能买 100 股、后端说资金不足"的错位。
+     */
+    case '/api/trading/limits': {
+      const symbol = url.searchParams.get('symbol') ?? '';
+      json(res, {
+        symbol,
+        maxBuy: trading.maxBuyVolume(symbol),
+        maxSell: trading.maxSellVolume(symbol),
+      });
+      return;
+    }
+
     /**
      * 演示用：运行期调整丢帧概率。
      * 浏览器控制台执行 `fetch('/api/debug/drop?rate=0.4')` 就能当场看到
@@ -191,6 +254,77 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
 
     default:
       json(res, { error: 'Not Found' }, 404);
+  }
+}
+
+// ------------------------------------------------------------------ 交易（POST）
+
+async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    size += buf.length;
+    if (size > 64 * 1024) throw new Error('请求体过大');
+    chunks.push(buf);
+  }
+  if (chunks.length === 0) return {};
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+}
+
+async function handlePost(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+): Promise<void> {
+  const path = url.pathname;
+  try {
+    // ---- 下单
+    if (path === '/api/orders') {
+      const body = await readJsonBody(req);
+      const clientOrderId = String(body.clientOrderId ?? '');
+      if (!clientOrderId) {
+        json(res, { code: 'MISSING_CLIENT_ORDER_ID', message: '缺少客户端订单号（幂等键）' }, 400);
+        return;
+      }
+      const symbol = String(body.symbol ?? '');
+      if (!INSTRUMENT_MAP.has(symbol)) {
+        json(res, { code: 'UNKNOWN_SYMBOL', message: `未知标的 ${symbol}` }, 400);
+        return;
+      }
+      const draft: OrderDraft & { clientOrderId: string } = {
+        clientOrderId,
+        symbol,
+        side: body.side === 'sell' ? 'sell' : 'buy',
+        type: body.type === 'market-opponent' ? 'market-opponent' : 'limit',
+        price: Number(body.price ?? 0),
+        volume: Math.floor(Number(body.volume ?? 0)),
+      };
+      const result = trading.submitOrder(draft, clock.now());
+      if (!result.ok) {
+        // 400 + 结构化 code：前端据此做精确提示，而不是弹一句"下单失败"
+        json(res, { code: result.code, message: result.message, order: result.order }, 400);
+        return;
+      }
+      json(res, { order: result.order, deduplicated: result.deduplicated });
+      return;
+    }
+
+    // ---- 撤单
+    const cancelMatch = /^\/api\/orders\/([^/]+)\/cancel$/.exec(path);
+    if (cancelMatch) {
+      const result = trading.cancelOrder(decodeURIComponent(cancelMatch[1]), clock.now());
+      if (!result.ok) {
+        json(res, { code: result.code, message: result.message }, 400);
+        return;
+      }
+      json(res, { order: result.order, deduplicated: result.deduplicated });
+      return;
+    }
+
+    json(res, { error: 'Not Found' }, 404);
+  } catch (e) {
+    json(res, { code: 'BAD_REQUEST', message: String(e) }, 400);
   }
 }
 
@@ -211,6 +345,7 @@ server.listen(PORT, () => {
   console.log(`   虚拟时间  ${info.clock.virtualTime}  (${info.clock.phase})`);
   console.log(`   标的数    ${info.instruments}`);
   console.log(`   推帧      ${info.frameMs}ms   丢帧概率 ${info.dropRate}`);
+  console.log(`   交易      T+1 ${(process.env.T1 ?? '1') !== '0' ? '开启' : '关闭'}   初始资金 ${trading.getAccount().cash.toFixed(0)} 元`);
   console.log('');
 });
 

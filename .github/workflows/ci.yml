@@ -30,5 +30,8 @@ jobs:
       - name: 行情协议自动化自测
         run: pnpm test:protocol
 
+      - name: 交易链路自动化自测
+        run: pnpm test:trading
+
       - name: 构建前端
         run: pnpm --filter @stock/web build

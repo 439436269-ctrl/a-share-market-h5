@@ -10,11 +10,13 @@ import {
   limitLabel,
   turnoverRate,
 } from '@stock/market-core';
-import type { Bar, Period } from '@stock/market-core';
+import type { Bar, OrderSide, Period } from '@stock/market-core';
 import { KLineChart } from '../chart/KLineChart';
 import { TimeShareChart } from '../chart/TimeShareChart';
 import { DepthPanel, TickList } from '../chart/DepthPanel';
+import { OrderSheet } from '../components/OrderSheet';
 import { useInstruments, useQuote, useTicks } from '../store';
+import { useAccount } from '../tradingStore';
 import { acquire, fetchKline, release } from '../net';
 
 const TABS: Array<{ key: Period; label: string }> = [
@@ -59,6 +61,9 @@ export function DetailPage({ symbol }: { symbol: string }) {
 
   const [period, setPeriod] = useState<Period>('1m');
   const [toast, setToast] = useState('');
+  const [orderSide, setOrderSide] = useState<OrderSide | null>(null);
+  const account = useAccount();
+  const position = account?.positions.find((p) => p.symbol === symbol);
   const bars = useKline(symbol, period);
 
   // 进入详情页才订阅这只票，离开就退订（引用计数保证不误伤自选）
@@ -158,27 +163,41 @@ export function DetailPage({ symbol }: { symbol: string }) {
 
       <div className="card">
         <div className="trade-actions" style={{ paddingTop: 12 }}>
-          <button
-            className="btn btn-primary"
-            disabled={!tradable}
-            onClick={() => setToast('下单链路将在 M5 里程碑实现')}
-          >
+          <button className="btn btn-primary" disabled={!tradable} onClick={() => setOrderSide('buy')}>
             买入
           </button>
-          <button
-            className="btn btn-primary sell"
-            disabled={!tradable}
-            onClick={() => setToast('下单链路将在 M5 里程碑实现')}
-          >
+          <button className="btn btn-primary sell" disabled={!tradable} onClick={() => setOrderSide('sell')}>
             卖出
           </button>
         </div>
+        <div className="trade-meta">
+          <span>
+            持仓 <b>{position?.volume ?? 0}</b> 股
+          </span>
+          <span>
+            可用 <b>{position?.available ?? 0}</b> 股
+          </span>
+          {!tradable && (
+            <span className="warn">
+              {quote ? PHASE_LABEL[quote.phase] : '非交易时段'}，不可下单
+            </span>
+          )}
+        </div>
         {!tradable && (
-          <div style={{ padding: '0 12px 12px', fontSize: 11, color: 'var(--text-3)' }}>
-            当前 {quote ? PHASE_LABEL[quote.phase] : '非交易时段'}，不可下单 —— 交易状态由服务端下发，不由前端本地时间猜测
+          <div className="trade-note">
+            交易状态由服务端下发，不由前端本地时间猜测 —— 否则会出现"服务端说收盘了、按钮还是亮的"
           </div>
         )}
       </div>
+
+      {orderSide && (
+        <OrderSheet
+          symbol={symbol}
+          side={orderSide}
+          onClose={() => setOrderSide(null)}
+          onToast={setToast}
+        />
+      )}
 
       {toast && <div className="toast">{toast}</div>}
     </>

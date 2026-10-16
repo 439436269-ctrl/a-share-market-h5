@@ -678,3 +678,447 @@ body {
   color: var(--text-3);
   font-size: 13px;
 }
+
+.muted {
+  color: var(--text-3);
+}
+
+/* ============================================================================
+   交易：账户概览
+   ========================================================================== */
+.asset-label {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.asset-total {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.asset-pnl {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.asset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.asset-grid .k {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.asset-grid .v {
+  font-size: 13px;
+}
+
+/* ============================================================================
+   交易列表
+   ========================================================================== */
+.trade-head {
+  grid-template-columns: minmax(0, 1fr) 100px 84px;
+}
+.trade-head .c-chg {
+  text-align: right;
+}
+/* 表头文字不允许折行，否则"价格 / 数量"会被拆成两行 */
+.list-head span {
+  white-space: nowrap;
+}
+.trade-row {
+  height: 58px;
+}
+.trade-row .sub {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.trade-row .c-price {
+  font-size: 14px;
+}
+.trade-row .c-chg {
+  display: block;
+  text-align: right;
+  font-size: 13px;
+}
+
+/* 委托行 */
+.order-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.order-row:last-child {
+  border-bottom: none;
+}
+.order-main {
+  flex: 1;
+  min-width: 0;
+}
+.order-line1 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+}
+.order-line2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-2);
+  margin-top: 3px;
+}
+.order-name {
+  font-weight: 500;
+}
+.order-spacer {
+  flex: 1;
+}
+.order-reason {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--up);
+}
+.fill-bar {
+  margin-top: 5px;
+  height: 3px;
+  background: var(--warn-bg);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.fill-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+.btn-cancel {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  flex: none;
+}
+
+.chip.ok {
+  background: var(--down-soft);
+  color: var(--down);
+}
+.chip.bad {
+  background: var(--up-soft);
+  color: var(--up);
+}
+
+/* 详情页交易区 */
+.trade-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 0 12px 10px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.trade-meta b {
+  color: var(--text);
+}
+.trade-meta .warn {
+  color: #ff9f0a;
+}
+.trade-note {
+  padding: 0 12px 12px;
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.6;
+}
+
+/* Tab 上的可撤委托角标 */
+.tab {
+  position: relative;
+}
+.tab-dot {
+  position: absolute;
+  top: 3px;
+  left: 50%;
+  transform: translateX(9px);
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--up);
+  color: #fff;
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+}
+
+/* ============================================================================
+   下单弹层
+   ========================================================================== */
+.sheet-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.sheet {
+  width: 100%;
+  max-width: 480px;
+  background: var(--card);
+  border-radius: 16px 16px 0 0;
+  padding-bottom: var(--safe-b);
+  max-height: 92dvh;
+  overflow-y: auto;
+  animation: sheetUp 0.22s ease-out;
+}
+@keyframes sheetUp {
+  from {
+    transform: translateY(26px);
+    opacity: 0.5;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--card);
+  z-index: 2;
+}
+.seg2 {
+  flex: 1;
+  display: flex;
+  background: var(--warn-bg);
+  border-radius: 10px;
+  padding: 3px;
+}
+.seg2-item {
+  flex: 1;
+  height: 32px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.seg2-item.active {
+  background: var(--card);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+.seg2-item.active.up {
+  color: var(--up);
+}
+.seg2-item.active.down {
+  color: var(--down);
+}
+
+.sheet-body {
+  padding: 12px;
+}
+.sheet-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 15px;
+  font-weight: 600;
+}
+.sheet-sub {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-3);
+  margin: 4px 0 14px;
+}
+
+.field {
+  margin-bottom: 16px;
+}
+.field-label {
+  font-size: 12px;
+  color: var(--text-2);
+  margin-bottom: 6px;
+}
+.field-hint {
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.6;
+  margin-top: 6px;
+}
+.field-hint.inline {
+  margin-top: 0;
+  align-self: center;
+}
+
+.chip-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.chip-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.chip-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.chip-btn.up {
+  color: var(--up);
+}
+.chip-btn.down {
+  color: var(--down);
+}
+.chip-btn:disabled {
+  opacity: 0.45;
+}
+
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0 12px;
+  font-size: 17px;
+  font-weight: 600;
+  text-align: center;
+  background: var(--card);
+  color: var(--text);
+}
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.input:disabled {
+  background: var(--warn-bg);
+  color: var(--text-3);
+}
+.step-btn {
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 10px;
+  font-size: 20px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.step-btn:active {
+  background: var(--warn-bg);
+}
+.step-btn:disabled {
+  opacity: 0.4;
+}
+
+.form-preview {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--warn-bg);
+  border-radius: 10px;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+.form-error {
+  padding: 9px 12px;
+  background: var(--up-soft);
+  color: var(--up);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+.form-hint {
+  padding: 9px 12px;
+  background: var(--warn-bg);
+  color: var(--text-2);
+  border-radius: 10px;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.confirm-box {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.confirm-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.confirm-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+.confirm-rows {
+  display: grid;
+  gap: 7px;
+  font-size: 13px;
+}
+.confirm-rows > div {
+  display: flex;
+  justify-content: space-between;
+}
+.confirm-tip {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.6;
+}
+.confirm-actions {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 10px;
+}
+
+.spin {
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  display: inline-block;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* 加载中不能被"置灰只降透明度"的规则压暗 —— 转圈与置灰是两种语义 */
+.btn.loading:disabled {
+  opacity: 1;
+}

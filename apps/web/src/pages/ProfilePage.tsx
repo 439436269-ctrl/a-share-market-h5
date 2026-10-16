@@ -43,6 +43,7 @@ export function ProfilePage() {
           <div>· 传输：WebSocket 广播帧 + 全局 seq + 缺口补拉 + 心跳/退避重连</div>
           <div>· 服务端：Node BFF 代理行情源（浏览器无法直连，CORS + Referer 限制）</div>
           <div>· 数据链路：逐笔成交 → 1 分钟 bar → 日线，读时聚合</div>
+          <div>· 交易：下单/撤单、共享风控校验、幂等防重、价格笼子、T+1、委托与成交实时回报</div>
           <div>· 虚拟时钟：任何时间打开都能看到完整交易日，便于演示与回归</div>
         </div>
       </div>

@@ -10,6 +10,7 @@
  *    Codec 接口预留二进制（Protobuf / 自定义二进制）实现，压测时对比。
  */
 import type { Quote, Tick } from './types';
+import type { Account, Order, Trade } from './trading';
 
 export const PROTOCOL_VERSION = 1;
 
@@ -42,7 +43,22 @@ export type ServerMessage =
   /** 增量帧：只含本帧发生变化的标的 */
   | { t: 'delta'; seq: number; quotes: Quote[]; ticks: Tick[] }
   | { t: 'pong'; ts: number; serverTs: number }
-  | { t: 'error'; code: string; message: string };
+  | { t: 'error'; code: string; message: string }
+  // ---------------------------------------------------------------- 交易私有回报
+  //
+  // 注意：这些消息**刻意不参与行情帧的全局 seq 机制**。
+  // 行情是广播、可容忍丢帧（丢了下一次全量补得回来）；
+  // 交易回报是**用户私有事件**，丢一条用户看到的委托状态就是错的，必须逐条送达。
+  // 所以两者走同一根 WebSocket，但属于两套不同的可靠性语义 —— 混在一起才是错的。
+  // （生产系统通常还会给回报单独加序号与补拉接口；这里以建连时的交易快照作为恢复路径。）
+  /** 建连后的交易快照：委托 / 成交 / 资金持仓 */
+  | { t: 'trading'; orders: Order[]; trades: Trade[]; account: Account }
+  /** 委托状态变更回报 */
+  | { t: 'order'; order: Order }
+  /** 成交回报 */
+  | { t: 'trade'; trade: Trade }
+  /** 资金与持仓变更回报 */
+  | { t: 'account'; account: Account };
 
 // ---------------------------------------------------------------- 编解码
 

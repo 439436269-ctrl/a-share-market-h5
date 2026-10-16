@@ -9,6 +9,7 @@
     "start": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test:protocol": "node scripts/protocol-test.mjs",
+    "test:trading": "node scripts/trading-test.mjs",
     "bench": "node scripts/bench.mjs"
   },
   "dependencies": {

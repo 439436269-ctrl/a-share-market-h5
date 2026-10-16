@@ -21,12 +21,15 @@ import {
   jsonCodec,
 } from '@stock/market-core';
 import type {
+  Account,
   ClientMessage,
   Codec,
   ConnectionStatus,
+  Order,
   Quote,
   ServerMessage,
   Tick,
+  Trade,
 } from '@stock/market-core';
 
 /** WebSocket 的最小接口约束 —— 浏览器用原生实现，Node 端注入 `ws`，便于自动化测试 */
@@ -75,6 +78,12 @@ export interface MarketConnectionOptions {
   onGap?: (info: GapInfo) => void;
   onStats?: (stats: MarketStats) => void;
   log?: (msg: string) => void;
+  // ---- 交易私有回报（不参与行情帧的 seq 机制，见 protocol.ts 的说明）
+  /** 建连后的交易快照：委托 / 成交 / 资金持仓 */
+  onTradingSnapshot?: (snapshot: { orders: Order[]; trades: Trade[]; account: Account }) => void;
+  onOrder?: (order: Order) => void;
+  onTrade?: (trade: Trade) => void;
+  onAccount?: (account: Account) => void;
 }
 
 export class MarketConnection {
@@ -218,6 +227,27 @@ export class MarketConnection {
         this.lastPongAt = Date.now();
         this.rtt = this.lastPongAt - msg.ts;
         this.emitStats();
+        break;
+
+      // ---- 交易私有回报：不走序号守卫，直接上抛（丢一条就是状态错，语义与行情不同）
+      case 'trading':
+        this.opts.onTradingSnapshot?.({
+          orders: msg.orders,
+          trades: msg.trades,
+          account: msg.account,
+        });
+        break;
+
+      case 'order':
+        this.opts.onOrder?.(msg.order);
+        break;
+
+      case 'trade':
+        this.opts.onTrade?.(msg.trade);
+        break;
+
+      case 'account':
+        this.opts.onAccount?.(msg.account);
         break;
 
       case 'snapshot': {
